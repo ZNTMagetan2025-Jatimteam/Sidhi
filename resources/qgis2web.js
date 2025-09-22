@@ -15,6 +15,41 @@ map.getView().fit([12377078.813401, -866294.882561, 12393467.830087, -858077.399
     var hasTouchScreen = map.getViewport().classList.contains('ol-touch');
     var isSmallScreen = window.innerWidth < 650;
 
+// ==== Mobile tuning ====
+var HIT = hasTouchScreen ? 14 : 4;
+
+// Di HP jangan pakai hover highlight, biar tap lebih responsif
+if (hasTouchScreen) {
+  doHover = false;
+  doHighlight = false;
+}
+
+/* ==== Drop-in: Perbesar hitTolerance secara global ====
+   Tidak mengubah handler yang ada—cukup membungkus forEachFeatureAtPixel.
+   Aman untuk OL lama: kalau options nggak didukung, dia otomatis fallback. */
+(function widenHitTolerance(m, H) {
+  if (!m || typeof m.forEachFeatureAtPixel !== 'function') return;
+
+  // simpan fungsi asli
+  var _orig = m.forEachFeatureAtPixel.bind(m);
+
+  // ganti dengan wrapper
+  m.forEachFeatureAtPixel = function (pixel, callback, options) {
+    // pastikan options ada dan sisipkan hitTolerance
+    options = options || {};
+    if (typeof options.hitTolerance === 'undefined') {
+      options.hitTolerance = H;
+    }
+    try {
+      // coba panggil dengan options (OL modern)
+      return _orig(pixel, callback, options);
+    } catch (e) {
+      // fallback: panggil tanpa options (kalau OL sangat lama)
+      return _orig(pixel, callback);
+    }
+  };
+})(map, HIT);
+
 ////controls container
 
     //top left container
@@ -102,11 +137,11 @@ var featureOverlay = new ol.layer.Vector({
     }),
     style: [new ol.style.Style({
         stroke: new ol.style.Stroke({
-            color: '#f00',
+            color: 'rgba(255, 213, 0, 1)',
             width: 1
         }),
         fill: new ol.style.Fill({
-            color: 'rgba(255,0,0,0.1)'
+            color: 'rgba(255, 196, 0, 0.1)'
         }),
     })],
     updateWhileAnimating: true, // optional, for instant visual feedback
@@ -212,7 +247,7 @@ function onPointerMove(evt) {
             }
         }
     });
-    if (popupText == '<ul>') {
+        if (popupText == '<ul>') {
         popupText = '';
     } else {
         popupText += '</ul>';
@@ -237,21 +272,28 @@ function onPointerMove(evt) {
                     var radius
 					if (typeof clusteredFeatures == "undefined") {
 						radius = featureStyle.getImage().getRadius();
-					} else {
-						radius = parseFloat(featureStyle.split('radius')[1].split(' ')[1]) + clusterLength;
-					}
+					 } else if (typeof clusteredFeatures != "undefined") {
+                        radius = 8; // default kalau cluster
+                    } else {
+                        radius = 6; // default aman
+                    }
 
                     highlightStyle = new ol.style.Style({
                         image: new ol.style.Circle({
-                            fill: new ol.style.Fill({
-                                color: "#ffff00"
-                            }),
-                            radius: radius
+                                radius:radius,
+                            stroke: new ol.style.Stroke({
+                                color: "#ffff00",
+                                width: 2,
                         })
                     })
-                } else if (currentFeature.getGeometry().getType() == 'LineString' || currentFeature.getGeometry().getType() == 'MultiLineString') {
+                    
+                });
 
-                    var featureWidth = featureStyle.getStroke().getWidth();
+                } else if (currentFeature.getGeometry().getType() == 'LineString' || currentFeature.getGeometry().getType() == 'MultiLineString') {
+                // LINE: garis kuning
+                var featureWidth = (featureStyle && featureStyle.getStroke && featureStyle.getStroke())
+                    ? Math.max(2, featureStyle.getStroke().getWidth())
+                    : 2;
 
                     highlightStyle = new ol.style.Style({
                         stroke: new ol.style.Stroke({
@@ -262,10 +304,33 @@ function onPointerMove(evt) {
                     });
 
                 } else {
+                     // POLYGON/MULTIPOLYGON: hanya outline (tanpa fill)
+                    var polyStrokeWidth = (featureStyle && featureStyle.getStroke && featureStyle.getStroke())
+                        ? Math.max(2, featureStyle.getStroke().getWidth())
+                        : 2;
+
                     highlightStyle = new ol.style.Style({
-                        fill: new ol.style.Fill({
-                            color: '#ffff00'
-                        })
+                        stroke: new ol.style.Stroke({
+                            color: '#ffff00',
+                            width: polyStrokeWidth
+                        }),
+                        geometry: function (f) {
+                            var g = f.getGeometry();
+                            var t = g.getType();
+                            if (t === 'Polygon') {
+                                return new ol.geom.MultiLineString(g.getCoordinates());
+                            }
+                            if (t === 'MultiPolygon') {
+                                var lines = [];
+                                g.getPolygons().forEach(function (p) {
+                                var rings = p.getCoordinates();
+                                for (var i = 0; i < rings.length; i++) lines.push(rings[i]);
+                                });
+                                return new ol.geom.MultiLineString(lines);
+                            }
+                            return g;
+                            }
+
                     })
                 }
                 featureOverlay.getSource().addFeature(currentFeature);
@@ -274,7 +339,7 @@ function onPointerMove(evt) {
             highlight = currentFeature;
         }
     }
-
+    
     if (doHover) {
         if (popupText) {
 			content.innerHTML = popupText;
@@ -437,6 +502,120 @@ function onSingleClickWMS(evt) {
 
 map.on('singleclick', onSingleClickFeatures);
 map.on('singleclick', onSingleClickWMS);
+// ==== Tap-friendly Select (kompatibel, tidak bikin legend hilang) ====
+// Jangan set "condition" (biar default singleClick) -> aman lintas versi
+var tapSelect = new ol.interaction.Select({
+  hitTolerance: hasTouchScreen ? 16 : 4,
+  // Filter layer aman: cek source vector saja (tanpa VectorImage)
+  layers: function (l) {
+    if (!l) return false;
+    if (l.get && l.get('interactive') === false) return false;
+    var src = l.getSource && l.getSource();
+    return !!(src && src instanceof ol.source.Vector);
+  },
+  style: null
+});
+map.addInteraction(tapSelect);
+
+// WMS jangan jalan kalau sudah kena vector
+window.__lastVectorHit = false;
+
+tapSelect.on('select', function (e) {
+  window.__lastVectorHit = false;
+
+  if (!e.selected.length) { // kosong -> tutup popup
+    container.style.display = 'none';
+    return;
+  }
+
+  var coord = e.mapBrowserEvent.coordinate;
+  var pixel = map.getEventPixel(e.mapBrowserEvent.originalEvent);
+
+  var popupText = '<ul>';
+  var found = false;
+
+  // Ambil (feature, layer) via forEachFeatureAtPixel — pakai options kalau ada, fallback kalau tidak
+  function renderAtPixel() {
+    return map.forEachFeatureAtPixel(pixel, function (feature, layer) {
+      if (!(layer && feature instanceof ol.Feature)) return;
+      if (layer.get('interactive') === false) return;
+
+      var clustered = feature.get('features'); // cluster?
+      if (Array.isArray(clustered) && clustered.length) {
+        for (var i = 0; i < clustered.length; i++) {
+          var f = clustered[i];
+          var keys = f.getKeys();
+          popupText += '<li><table>';
+          popupText += '<a><b>' + (layer.get('popuplayertitle') || layer.get('title') || 'Info') + '</b></a>';
+          popupText += createPopupField(f, keys, layer);
+          popupText += '</table></li>';
+        }
+        try {
+          featureOverlay.getSource().clear();
+          featureOverlay.getSource().addFeature(clustered[0]);
+        } catch (_) {}
+      } else {
+        var keys2 = feature.getKeys();
+        popupText += '<li><table>';
+        popupText += '<a><b>' + (layer.get('popuplayertitle') || layer.get('title') || 'Info') + '</b></a>';
+        popupText += createPopupField(feature, keys2, layer);
+        popupText += '</table></li>';
+        try {
+          featureOverlay.getSource().clear();
+          featureOverlay.getSource().addFeature(feature);
+        } catch (_) {}
+      }
+
+      found = true;
+      return true; // cukup satu layer
+    }, {
+      hitTolerance: hasTouchScreen ? 16 : 4,
+      layerFilter: function (l) { return !l || l.get('interactive') !== false; }
+    });
+  }
+
+  // panggil dengan try/catch utk OL lama yang belum dukung options
+  try { renderAtPixel(); } catch (e2) {
+    map.forEachFeatureAtPixel(pixel, function (feature, layer) {
+      if (!(layer && feature instanceof ol.Feature)) return;
+      if (layer.get('interactive') === false) return;
+
+      var clustered = feature.get('features');
+      if (Array.isArray(clustered) && clustered.length) {
+        for (var i = 0; i < clustered.length; i++) {
+          var f = clustered[i];
+          var keys = f.getKeys();
+          popupText += '<li><table>';
+          popupText += '<a><b>' + (layer.get('popuplayertitle') || layer.get('title') || 'Info') + '</b></a>';
+          popupText += createPopupField(f, keys, layer);
+          popupText += '</table></li>';
+        }
+        try { featureOverlay.getSource().clear(); featureOverlay.getSource().addFeature(clustered[0]); } catch(_) {}
+      } else {
+        var keys2 = feature.getKeys();
+        popupText += '<li><table>';
+        popupText += '<a><b>' + (layer.get('popuplayertitle') || layer.get('title') || 'Info') + '</b></a>';
+        popupText += createPopupField(feature, keys2, layer);
+        popupText += '</table></li>';
+        try { featureOverlay.getSource().clear(); featureOverlay.getSource().addFeature(feature); } catch(_) {}
+      }
+      found = true;
+      return true;
+    });
+  }
+
+  if (found) {
+    popupText += '</ul>';
+    content.innerHTML = popupText;
+    container.style.display = 'block';
+    overlayPopup.setPosition(coord);
+    window.__lastVectorHit = true;
+  } else {
+    container.style.display = 'none';
+  }
+});
+
+
 
 //get container
 var topLeftContainerDiv = document.getElementById('top-left-container')
@@ -1138,3 +1317,33 @@ document.addEventListener('DOMContentLoaded', function() {
     if (attributionControl) {
         bottomRightContainerDiv.appendChild(attributionControl);
     }
+        /* === MATIKAN LAYER DATA SEBELUM DIKLIK DI LEGENDA (kecuali basemap) === */
+(function turnOffLayersForMobile() {
+  // deteksi & matikan semua layer non-basemap di layersList
+  function offIfNotBase(layer) {
+    if (layer instanceof ol.layer.Group) {
+      layer.getLayers().forEach(offIfNotBase);
+      return;
+    }
+    // biarkan layer yang memang disembunyikan dari legend
+    if (layer.get && layer.get('displayInLayerSwitcher') === false) return;
+
+    var title  = (layer.get && layer.get('title')) || '';
+    var isBase =
+      (layer.get && layer.get('type') === 'base') ||                            // QGIS2Web base
+      /(^|\b)(base|basemap|bing|google|carto|stamen)\b/i.test(title) ||     // judul umum basemap
+      (layer.getSource && (
+        layer.getSource() instanceof ol.source.OSM ||
+        layer.getSource() instanceof ol.source.BingMaps ||
+        layer.getSource() instanceof ol.source.XYZ
+      ));
+
+    if (!isBase && layer.setVisible) {
+      layer.setVisible(false);  // mati dulu—user nyalakan via LayerSwitcher
+    }
+  }
+
+  if (Array.isArray(layersList)) {
+    layersList.forEach(offIfNotBase);
+  }
+})();
